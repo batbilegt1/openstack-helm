@@ -1,0 +1,7 @@
+storage: ceph
+ceph:
+  rbd_store_pool: images
+  rbd_store_user: glance
+  rados_connect_timeout: 0
+  secret_name: pvc-ceph-client-key
+  ceph_conf: /etc/ceph/ceph.conf

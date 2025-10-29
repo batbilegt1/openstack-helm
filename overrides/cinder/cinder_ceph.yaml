@@ -1,0 +1,19 @@
+cinder:
+  config:
+    cinder.conf:
+      rbd:
+        volume_driver: cinder.volume.drivers.rbd.RBDDriver
+        rbd_pool: volumes
+        rbd_ceph_conf: /etc/ceph/ceph.conf
+        rbd_user: volumes
+        rbd_secret_uuid: "ce-drivers-not-needed" # optional for Helm
+        rbd_flatten_volume_from_snapshot: false
+        rbd_max_clone_depth: 5
+        rbd_store_chunk_size: 4
+        rados_connect_timeout: -1
+        glance_api_version: 2
+
+  extra_mounts:
+    - name: ceph-conf
+      mountPath: /etc/ceph
+      hostPath: /etc/ceph
