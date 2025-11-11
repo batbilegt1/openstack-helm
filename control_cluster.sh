@@ -1,34 +1,19 @@
+#!/bin/bash
+
 # === USER CONFIGURATION ===
 NODES=(
-  "ctr-m1 10.10.0.4"
-  "ctr-w1 10.10.0.5"
-  "ctr-w2 10.10.0.6"
-  "ctr-w3 10.10.0.7"
+  "vm1 192.168.122.68"
+  "vm2 192.168.122.54"
+  "vm3 192.168.122.122"
+  "vm4 192.168.122.73"
 )
-CONTROL_PLANE_HOSTNAME="ctr-m1"
+CONTROL_PLANE_HOSTNAME="vm1"
 USER="ubuntu"
 SSH_KEY="$HOME/.ssh/id_rsa"
 PUB_KEY="${SSH_KEY}.pub"
 
-# === OpenStack-Helm / Kubernetes Variables ===
-export OPENSTACK_RELEASE=2025.1
-export FEATURES="${OPENSTACK_RELEASE} ubuntu_noble"
-export OVERRIDES_DIR="$HOME/osh/openstack-helm/overrides"
-export OVERRIDES_URL="https://raw.githubusercontent.com/batbilegt1/openstack-helm/main/overrides"
-
-OPENSTACK_NS="openstack"
-KUBE_SYSTEM_NS="kube-system"
-CEPH_SECRET_NAME="ceph-secret"
-CEPH_KEY="AQBaTfxoYcxvIRAAflY7kBnDowRCuWlybuFLrA=="
-CLUSTER_ID="5177a171-b158-11f0-9cce-905a08117d5a"
-MONITOR_IP="10.10.0.12:6789"
-
 # === Install Helm ===
-curl -fsSL https://get.helm.sh/helm-v3.15.3-linux-amd64.tar.gz -o helm.tar.gz
-tar -xvf helm.tar.gz
-sudo mv linux-amd64/helm /usr/local/bin/helm
-helm version
-
+sudo snap install helm --classic
 helm repo add openstack-helm https://tarballs.opendev.org/openstack/openstack-helm
 helm plugin install https://opendev.org/openstack/openstack-helm-plugin
 
@@ -37,9 +22,11 @@ mkdir -p ~/osh && cd ~/osh
 git clone https://opendev.org/openstack/openstack-helm.git
 git clone https://opendev.org/zuul/zuul-jobs.git
 
+# === Install Ansible ===
 sudo apt update
-sudo apt install -y python3-pip ansible
+sudo apt install -y python3-pip
 pip install --user ansible
+sudo apt install -y ansible
 
 export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
 
@@ -48,7 +35,7 @@ cat > ~/osh/inventory.yaml <<EOF
 all:
   vars:
     ansible_user: $USER
-    ansible_port: 707
+    ansible_port: 22
     ansible_ssh_private_key_file: $SSH_KEY
     ansible_ssh_extra_args: -o StrictHostKeyChecking=no
     kubectl:
@@ -113,14 +100,21 @@ EOF
 cd ~/osh
 ansible-playbook -i inventory.yaml deploy-env.yaml
 
-# === Kubernetes Namespaces & Ingress ===
-kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace metallb-system --dry-run=client -o yaml | kubectl apply -f -
+tee > /tmp/openstack_namespace.yaml <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openstack
+EOF
+kubectl apply -f /tmp/openstack_namespace.yaml
+
+rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+helm plugin list
 
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --version="4.8.3" \
-  --namespace=$OPENSTACK_NS \
+  --namespace=openstack \
   --create-namespace \
   --set controller.kind=Deployment \
   --set controller.admissionWebhooks.enabled=false \
@@ -131,38 +125,52 @@ helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --set controller.ingressClass=nginx \
   --set controller.labels.app=ingress-api
 
-# === MetalLB Installation ===
+tee > /tmp/metallb_system_namespace.yaml <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+EOF
+kubectl apply -f /tmp/metallb_system_namespace.yaml
+
 helm repo add metallb https://metallb.github.io/metallb
 helm install metallb metallb/metallb -n metallb-system
 
-cat <<EOF | kubectl apply -f -
+tee > /tmp/metallb_ipaddresspool.yaml <<EOF
+---
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
-  name: public
-  namespace: metallb-system
+    name: public
+    namespace: metallb-system
 spec:
-  addresses:
-  - "172.24.128.0/24"
+    addresses:
+    - "172.24.128.0/24"
 EOF
 
-cat <<EOF | kubectl apply -f -
+kubectl apply -f /tmp/metallb_ipaddresspool.yaml
+
+tee > /tmp/metallb_l2advertisement.yaml <<EOF
+---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: public
-  namespace: metallb-system
+    name: public
+    namespace: metallb-system
 spec:
-  ipAddressPools:
-  - public
+    ipAddressPools:
+    - public
 EOF
 
-cat <<EOF | kubectl apply -f -
+kubectl apply -f /tmp/metallb_l2advertisement.yaml
+
+tee > /tmp/openstack_endpoint_service.yaml <<EOF
+---
 kind: Service
 apiVersion: v1
 metadata:
   name: public-openstack
-  namespace: $OPENSTACK_NS
+  namespace: openstack
   annotations:
     metallb.universe.tf/loadBalancerIPs: "172.24.128.100"
 spec:
@@ -177,10 +185,14 @@ spec:
       port: 443
 EOF
 
+kubectl apply -f /tmp/openstack_endpoint_service.yaml
+
 kubectl label --overwrite nodes --all openstack-control-plane=enabled
 
-# === Ceph Setup ===
-sudo apt install -y ceph-common
+echo "deb https://download.ceph.com/debian-reef/ jammy main" | sudo tee /etc/apt/sources.list.d/ceph.list
+wget -q -O- https://download.ceph.com/keys/release.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ceph.gpg
+sudo apt update
+sudo apt install -y cephadm ceph-common lvm2
 sudo mkdir -p /etc/ceph
 sudo mv /home/ubuntu/ceph.conf /etc/ceph/
 sudo mv /home/ubuntu/ceph.client.*.keyring /etc/ceph/
@@ -188,21 +200,35 @@ sudo chown root:root /etc/ceph/ceph.conf /etc/ceph/ceph.client.*.keyring
 sudo chmod 644 /etc/ceph/ceph.conf
 sudo chmod 600 /etc/ceph/ceph.client.*.keyring
 sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.keyring
+sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
+ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
 
-kubectl -n $OPENSTACK_NS create configmap ceph-etc \
+kubectl -n openstack create configmap ceph-etc \
   --from-file=ceph.conf=/etc/ceph/ceph.conf \
   --dry-run=client -o yaml | kubectl apply -f -
 
 helm repo add ceph-csi https://ceph.github.io/csi-charts
 helm repo update
-helm install ceph-csi-rbd ceph-csi/ceph-csi-rbd --namespace $KUBE_SYSTEM_NS
+helm install ceph-csi-rbd ceph-csi/ceph-csi-rbd --namespace kube-system
 
-kubectl -n $OPENSTACK_NS create secret generic $CEPH_SECRET_NAME \
+kubectl get pods -n kube-system | grep csi
+kubectl get csidrivers
+
+OPENSTACK_NS="openstack"
+KUBE_SYSTEM_NS="kube-system"
+CEPH_SECRET_NAME="ceph-secret"
+CEPH_KEY="AQAqzQ1pSInIKhAAiecs+MN4nT8PMwF2LaxgpQ=="
+CLUSTER_ID="6e5c1cd1-bbc6-11f0-92ec-525400d7cbaf"
+MONITOR_IP="192.168.122.28:6789"
+
+kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic $CEPH_SECRET_NAME \
+  --namespace=$OPENSTACK_NS \
   --type="kubernetes.io/rbd" \
   --from-literal=key="$CEPH_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# === StorageClass & Ceph CSI Config ===
 cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -243,43 +269,206 @@ data:
     ]
 EOF
 
-kubectl -n $OPENSTACK_NS create secret generic pvc-ceph-client-key \
+kubectl get sc -A
+
+kubectl -n openstack create secret generic pvc-ceph-client-key \
   --from-literal=key="$CEPH_KEY"
 
-# === Download Helm Overrides & Deploy OpenStack Services ===
 cd ~/osh/openstack-helm
+
+export OPENSTACK_RELEASE=2025.1
+export FEATURES="${OPENSTACK_RELEASE} ubuntu_noble"
+export OVERRIDES_DIR=$(pwd)/overrides
+
+OVERRIDES_URL=https://opendev.org/openstack/openstack-helm/raw/branch/master/values_overrides
 for chart in rabbitmq mariadb memcached openvswitch libvirt keystone heat glance cinder placement nova neutron horizon; do
     helm osh get-values-overrides -d -u ${OVERRIDES_URL} -p ${OVERRIDES_DIR} -c ${chart} ${FEATURES}
 done
 
 helm upgrade --install rabbitmq openstack-helm/rabbitmq \
-    --namespace=$OPENSTACK_NS \
+    --namespace=openstack \
     --set pod.replicas.server=1 \
+    --timeout=600s \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c rabbitmq ${FEATURES})
 
 helm upgrade --install mariadb openstack-helm/mariadb \
-    --namespace=$OPENSTACK_NS \
+    --namespace=openstack \
     --set pod.replicas.server=1 \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c mariadb ${FEATURES})
 
 helm upgrade --install memcached openstack-helm/memcached \
-    --namespace=$OPENSTACK_NS \
+    --namespace=openstack \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c memcached ${FEATURES})
 
 helm upgrade --install keystone openstack-helm/keystone \
-    --namespace=$OPENSTACK_NS \
+    --namespace=openstack \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c keystone ${FEATURES})
 
 helm upgrade --install heat openstack-helm/heat \
-    --namespace=$OPENSTACK_NS \
+    --namespace=openstack \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c heat ${FEATURES})
 
+tee > ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml <<EOF
+# ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml
+storage: rbd
+
+conf:
+  ceph:
+    enabled: true
+    monitors: ["192.168.122.28:6789"]
+    keyring_secret_name: pvc-ceph-client-key   # ← your original key
+  glance:
+    default_store: rbd
+    stores: rbd
+    rbd:
+      rbd_store_pool: images
+      rbd_store_user: glance
+      rbd_store_ceph_conf: /etc/ceph/ceph.conf
+      rados_connect_timeout: -1
+      report_rbd_errors: true
+      # ← ADD THIS: tell Glance where the key is
+      rbd_store_ceph_keyring: /etc/ceph/keyring
+
+pod:
+  mounts:
+    glance_api:
+      volumeMounts:
+        - name: ceph-etc
+          mountPath: /etc/ceph
+          readOnly: true
+        # ← MOUNT AS /etc/ceph/keyring (not ceph.client.glance.keyring)
+        - name: ceph-keyring
+          mountPath: /etc/ceph/keyring
+          subPath: key
+          readOnly: true
+      volumes:
+        - name: ceph-etc
+          configMap:
+            name: ceph-etc
+            items:
+              - key: ceph.conf
+                path: ceph.conf
+        - name: ceph-keyring
+          secret:
+            secretName: pvc-ceph-client-key
+            items:
+              - key: key
+                path: keyring   # ← this becomes /etc/ceph/keyring
+EOF
+
 helm upgrade --install glance openstack-helm/glance \
-    --namespace=$OPENSTACK_NS \
-    --values $OVERRIDES_DIR/glance/2025.1-ubuntu_noble.yaml \
-    --values $OVERRIDES_DIR/glance/glance_ceph.yaml
+  --namespace openstack \
+  --values /home/ubuntu/osh/openstack-helm/overrides/glance/2025.1-ubuntu_noble.yaml \
+  --values /home/ubuntu/osh/openstack-helm/overrides/glance/glance_ceph.yaml
+
+sudo ceph osd pool application enable images glance-image --yes-i-really-mean-it
+
+GLANCE_POD=$(kubectl get pod -n openstack -l application=glance,component=api -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n openstack $GLANCE_POD -- cat /etc/ceph/ceph.conf
+kubectl exec -n openstack $GLANCE_POD -- cat /etc/ceph/ceph.client.glance.keyring
+kubectl exec -n openstack $GLANCE_POD -- ceph -s
+kubectl exec -n openstack $GLANCE_POD -- rbd -p images ls
+
+
+sudo tee ~/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml > /dev/null<<EOF
+cinder:
+  config:
+    cinder.conf:
+      rbd:
+        volume_driver: cinder.volume.drivers.rbd.RBDDriver
+        rbd_pool: volumes
+        rbd_ceph_conf: /etc/ceph/ceph.conf
+        rbd_user: volumes
+        rbd_secret_uuid: "ce-drivers-not-needed" # optional for Helm
+        rbd_flatten_volume_from_snapshot: false
+        rbd_max_clone_depth: 5
+        rbd_store_chunk_size: 4
+        rados_connect_timeout: -1
+        glance_api_version: 2
+
+  extra_mounts:
+    - name: ceph-conf
+      mountPath: /etc/ceph
+      hostPath: /etc/ceph
+EOF
 
 helm upgrade --install cinder openstack-helm/cinder \
-    --namespace=$OPENSTACK_NS \
-    --values $OVERRIDES_DIR/cinder/2025.1-ubuntu_noble.yaml \
-    --values $OVERRIDES_DIR/cinder/cinder_ceph.yaml
+  --namespace openstack \
+  --values /home/ubuntu/osh/openstack-helm/overrides/cinder/2025.1-ubuntu_noble.yaml \
+  --values /home/ubuntu/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml
+
+
+
+
+kubectl patch svc neutron-server -n openstack \
+  -p '{"spec": {"type": "NodePort"}}'
+  
+kubectl expose pod rabbitmq-rabbitmq-0 \
+  --name rabbitmq-nodeport \
+  --namespace openstack \
+  --port 5672 \
+  --target-port 5672 \
+  --type NodePort
+
+kubectl exec -it rabbitmq-rabbitmq-0 -n openstack -- bash
+rabbitmqctl add_user myuser 2023
+rabbitmqctl list_vhosts
+rabbitmqctl add_vhost neutron
+rabbitmqctl set_permissions -p / myuser ".*" ".*" ".*"
+rabbitmqctl set_permissions -p neutron myuser ".*" ".*" ".*"
+rabbitmqctl list_users
+rabbitmqctl list_permissions -p /
+rabbitmqctl list_user_permissions myuser
+
+
+kubectl create secret generic neutron-rabbitmq-user \
+  --from-literal=RABBITMQ_CONNECTION='rabbit://myuser:2023@10.3.0.17:5672/neutron' \
+  -n openstack --dry-run=client -o yaml | kubectl apply -f -
+
+
+sudo tee ~/osh/openstack-helm/overrides/neutron/neutron_ctr.yaml <<EOF
+pod:
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  replicas:
+    server: 1        # Neutron server runs here
+    dhcp_agent: 0
+    metadata_agent: 0
+    l3_agent: 0
+
+conf:
+  neutron:
+    DEFAULT:
+      # Unified RabbitMQ bus
+      transport_url: "rabbit://myuser:2023@10.3.0.17:5672/neutron"
+
+      # Core networking
+      l3_ha: false
+      allow_overlapping_ips: true
+      core_plugin: ml2
+      service_plugins: ""            # Remove L3 plugin
+      router_scheduler_driver: ""    # Disable L3 scheduler
+
+      # RPC tuning for multi-cluster
+      rpc_response_timeout: 60
+      rpc_retry_attempts: 3
+
+      # Controller Neutron API endpoint
+      neutron_endpoint_type: internal
+      neutron_url: "http://10.3.0.19:9696"
+
+bootstrap:
+  enabled: false
+
+entrypoint:
+  init:
+    DEPENDENCY_SERVICE: ""
+    DEPENDENCY_JOBS: ""
+EOF
+
+kubectl delete pods -n openstack -l application=neutron
+
+helm upgrade --install neutron-server ~/osh/openstack-helm/neutron \
+  --namespace=openstack \
+  --values ~/osh/openstack-helm/overrides/neutron/neutron_ctr.yaml
+
