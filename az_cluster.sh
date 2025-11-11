@@ -1,29 +1,20 @@
+#!/bin/bash
+
 # === USER CONFIGURATION ===
 NODES=(
-  "az-m1 10.10.0.8"
-  "az-w1 10.10.0.9"
-  "az-w2 10.10.0.10"
-  "az-w3 10.10.0.11"
+  "vm5 192.168.122.43"
+  "vm6 192.168.122.228"
+  "vm7 192.168.122.50"
+  "vm8 192.168.122.173"
+  "vm9 192.168.122.28"
 )
-CONTROL_PLANE_HOSTNAME="az-m1"
+CONTROL_PLANE_HOSTNAME="vm5"
 USER="ubuntu"
 SSH_KEY="$HOME/.ssh/id_rsa"
 PUB_KEY="${SSH_KEY}.pub"
 
-# === OpenStack-Helm / Kubernetes Variables ===
-export OPENSTACK_NS="openstack"
-export KUBE_SYSTEM_NS="kube-system"
-export CEPH_SECRET_NAME="ceph-secret"
-export CEPH_KEY="AQBaTfxoYcxvIRAAflY7kBnDowRCuWlybuFLrA=="
-export CLUSTER_ID="5177a171-b158-11f0-9cce-905a08117d5a"
-export MONITOR_IP="10.10.0.12:6789"
-
 # === Install Helm ===
-curl -fsSL https://get.helm.sh/helm-v3.15.3-linux-amd64.tar.gz -o helm.tar.gz
-tar -xvf helm.tar.gz
-sudo mv linux-amd64/helm /usr/local/bin/helm
-helm version
-
+sudo snap install helm --classic
 helm repo add openstack-helm https://tarballs.opendev.org/openstack/openstack-helm
 helm plugin install https://opendev.org/openstack/openstack-helm-plugin
 
@@ -33,8 +24,9 @@ git clone https://opendev.org/openstack/openstack-helm.git
 git clone https://opendev.org/zuul/zuul-jobs.git
 
 sudo apt update
-sudo apt install -y python3-pip ansible
+sudo apt install -y python3-pip
 pip install --user ansible
+sudo apt install -y ansible
 
 export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
 
@@ -43,7 +35,7 @@ cat > ~/osh/inventory.yaml <<EOF
 all:
   vars:
     ansible_user: $USER
-    ansible_port: 707
+    ansible_port: 22
     ansible_ssh_private_key_file: $SSH_KEY
     ansible_ssh_extra_args: -o StrictHostKeyChecking=no
     kubectl:
@@ -104,18 +96,20 @@ cat > ~/osh/deploy-env.yaml <<EOF
     - deploy-env
 EOF
 
-# === Run Ansible Playbook ===
+# === Run the Ansible Playbook ===
 cd ~/osh
 ansible-playbook -i inventory.yaml deploy-env.yaml
 
-# === Kubernetes Namespace ===
-kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
 kubectl label --overwrite nodes --all openstack-compute-node=enabled
 kubectl label --overwrite nodes --all openvswitch=enabled
 
-# === Ceph Client Setup ===
+rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+helm plugin list
+
+echo "deb https://download.ceph.com/debian-reef/ jammy main" | sudo tee /etc/apt/sources.list.d/ceph.list
+wget -q -O- https://download.ceph.com/keys/release.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ceph.gpg
 sudo apt update
-sudo apt install -y ceph-common
+sudo apt install -y cephadm ceph-common lvm2
 sudo mkdir -p /etc/ceph
 sudo mv /home/ubuntu/ceph.conf /etc/ceph/
 sudo mv /home/ubuntu/ceph.client.*.keyring /etc/ceph/
@@ -126,16 +120,28 @@ sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.ke
 sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
 
-kubectl -n $OPENSTACK_NS create configmap ceph-etc \
+kubectl -n openstack create configmap ceph-etc \
   --from-file=ceph.conf=/etc/ceph/ceph.conf \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# === Ceph CSI ===
 helm repo add ceph-csi https://ceph.github.io/csi-charts
 helm repo update
-helm install ceph-csi-rbd ceph-csi/ceph-csi-rbd --namespace $KUBE_SYSTEM_NS
+helm install ceph-csi-rbd ceph-csi/ceph-csi-rbd --namespace kube-system
 
-kubectl -n $OPENSTACK_NS create secret generic $CEPH_SECRET_NAME \
+kubectl get pods -n kube-system | grep csi
+kubectl get csidrivers
+
+OPENSTACK_NS="openstack"
+KUBE_SYSTEM_NS="kube-system"
+CEPH_SECRET_NAME="ceph-secret"
+CEPH_KEY="AQAqzQ1pSInIKhAAiecs+MN4nT8PMwF2LaxgpQ=="
+CLUSTER_ID="6e5c1cd1-bbc6-11f0-92ec-525400d7cbaf"
+MONITOR_IP="192.168.122.28:6789"
+
+kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic $CEPH_SECRET_NAME \
+  --namespace=$OPENSTACK_NS \
   --type="kubernetes.io/rbd" \
   --from-literal=key="$CEPH_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -181,7 +187,26 @@ data:
 EOF
 
 kubectl get sc -A
-kubectl -n $OPENSTACK_NS create secret generic pvc-ceph-client-key \
+
+kubectl -n openstack create secret generic pvc-ceph-client-key \
   --from-literal=key="$CEPH_KEY"
 
 cd ~/osh/openstack-helm
+
+export OPENSTACK_RELEASE=2025.1
+export FEATURES="${OPENSTACK_RELEASE} ubuntu_noble"
+export OVERRIDES_DIR=$(pwd)/overrides
+
+OVERRIDES_URL=https://opendev.org/openstack/openstack-helm/raw/branch/master/values_overrides
+for chart in rabbitmq mariadb memcached openvswitch libvirt keystone heat glance cinder placement nova neutron horizon; do
+    helm osh get-values-overrides -d -u ${OVERRIDES_URL} -p ${OVERRIDES_DIR} -c ${chart} ${FEATURES}
+done
+
+helm upgrade --install openvswitch openstack-helm/openvswitch \
+    --namespace=openstack \
+    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c openvswitch ${FEATURES})
+
+helm upgrade --install libvirt openstack-helm/libvirt \
+    --namespace=openstack \
+    --set conf.ceph.enabled=true \
+    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c libvirt ${FEATURES})
