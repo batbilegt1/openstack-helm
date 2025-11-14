@@ -1,14 +1,14 @@
 #!/bin/bash
+set -euo pipefail
 
 # === USER CONFIGURATION ===
 NODES=(
-  "vm5 192.168.122.43"
-  "vm6 192.168.122.228"
-  "vm7 192.168.122.50"
-  "vm8 192.168.122.173"
-  "vm9 192.168.122.28"
+  "vm15 192.168.122.230"
+  "vm16 192.168.122.147"
+  "vm17 192.168.122.96"
+  "vm18 192.168.122.191"
 )
-CONTROL_PLANE_HOSTNAME="vm5"
+CONTROL_PLANE_HOSTNAME="vm15"
 USER="ubuntu"
 SSH_KEY="$HOME/.ssh/id_rsa"
 PUB_KEY="${SSH_KEY}.pub"
@@ -23,6 +23,7 @@ mkdir -p ~/osh && cd ~/osh
 git clone https://opendev.org/openstack/openstack-helm.git
 git clone https://opendev.org/zuul/zuul-jobs.git
 
+# === Install Ansible ===
 sudo apt update
 sudo apt install -y python3-pip
 pip install --user ansible
@@ -120,76 +121,21 @@ sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.ke
 sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
 
+# Ensure ceph.conf hints for service users exist
+if ! sudo grep -q "^\[client.cinder\]" /etc/ceph/ceph.conf; then
+  sudo tee -a /etc/ceph/ceph.conf > /dev/null <<'EOF'
+[client.cinder]
+    keyfile = /etc/ceph/ceph.client.cinder.keyring
+    client_mount_timeout = 30
+EOF
+fi
+
 kubectl -n openstack create configmap ceph-etc \
   --from-file=ceph.conf=/etc/ceph/ceph.conf \
   --dry-run=client -o yaml | kubectl apply -f -
 
-helm repo add ceph-csi https://ceph.github.io/csi-charts
-helm repo update
-helm install ceph-csi-rbd ceph-csi/ceph-csi-rbd --namespace kube-system
-
-kubectl get pods -n kube-system | grep csi
-kubectl get csidrivers
-
 OPENSTACK_NS="openstack"
-KUBE_SYSTEM_NS="kube-system"
-CEPH_SECRET_NAME="ceph-secret"
-CEPH_KEY="AQAqzQ1pSInIKhAAiecs+MN4nT8PMwF2LaxgpQ=="
-CLUSTER_ID="6e5c1cd1-bbc6-11f0-92ec-525400d7cbaf"
-MONITOR_IP="192.168.122.28:6789"
-
 kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl create secret generic $CEPH_SECRET_NAME \
-  --namespace=$OPENSTACK_NS \
-  --type="kubernetes.io/rbd" \
-  --from-literal=key="$CEPH_KEY" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-cat <<EOF | kubectl apply -f -
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: general
-provisioner: rbd.csi.ceph.com
-parameters:
-  clusterID: "$CLUSTER_ID"
-  pool: rbd
-  imageFormat: "2"
-  imageFeatures: layering
-  csi.storage.k8s.io/provisioner-secret-name: $CEPH_SECRET_NAME
-  csi.storage.k8s.io/provisioner-secret-namespace: $OPENSTACK_NS
-  csi.storage.k8s.io/node-stage-secret-name: $CEPH_SECRET_NAME
-  csi.storage.k8s.io/node-stage-secret-namespace: $OPENSTACK_NS
-reclaimPolicy: Delete
-allowVolumeExpansion: true
-mountOptions:
-  - discard
-volumeBindingMode: Immediate
-EOF
-
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ceph-csi-config
-  namespace: $KUBE_SYSTEM_NS
-data:
-  config.json: |-
-    [
-      {
-        "clusterID": "$CLUSTER_ID",
-        "monitors": [
-          "$MONITOR_IP"
-        ]
-      }
-    ]
-EOF
-
-kubectl get sc -A
-
-kubectl -n openstack create secret generic pvc-ceph-client-key \
-  --from-literal=key="$CEPH_KEY"
 
 cd ~/osh/openstack-helm
 
@@ -204,9 +150,133 @@ done
 
 helm upgrade --install openvswitch openstack-helm/openvswitch \
     --namespace=openstack \
-    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c openvswitch ${FEATURES})
+  --wait --timeout=10m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c openvswitch ${FEATURES})
 
 helm upgrade --install libvirt openstack-helm/libvirt \
     --namespace=openstack \
     --set conf.ceph.enabled=true \
+    --wait --timeout=10m \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c libvirt ${FEATURES})
+
+# === Compute-only OpenStack services ===
+# Control cluster public and RabbitMQ LB IPs
+CONTROL_PUBLIC_IP="192.168.122.240"
+RABBIT_LB_IP="192.168.122.241"
+
+# Neutron: agents only on AZ cluster (OVS agent)
+cat > ~/osh/openstack-helm/overrides/neutron/neutron_agents_only.yaml <<EOF
+manifests:
+  daemonset_ovs_agent: true
+  daemonset_dhcp_agent: false
+  daemonset_l3_agent: false
+  daemonset_metadata_agent: false
+  daemonset_lb_agent: false
+  deployment_server: false
+  deployment_rpc_server: false
+  ingress_server: false
+  service_server: false
+  service_ingress_server: false
+endpoints:
+  oslo_messaging:
+    host_fqdn_override:
+      default: ${RABBIT_LB_IP}
+  identity:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        internal: 80
+  compute:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        default: 80
+EOF
+
+helm upgrade --install neutron openstack-helm/neutron \
+  --namespace openstack \
+  --wait --timeout=20m \
+  --values /home/ubuntu/osh/openstack-helm/overrides/neutron/2025.1-ubuntu_noble.yaml \
+  --values /home/ubuntu/osh/openstack-helm/overrides/neutron/neutron_agents_only.yaml
+
+# Nova: compute-only on AZ cluster
+cat > ~/osh/openstack-helm/overrides/nova/nova_compute_only.yaml <<EOF
+manifests:
+  daemonset_compute: true
+  deployment_api_metadata: false
+  deployment_api_osapi: false
+  deployment_conductor: false
+  deployment_novncproxy: false
+  deployment_serialproxy: false
+  deployment_spiceproxy: false
+  deployment_scheduler: false
+  ingress_metadata: false
+  ingress_novncproxy: false
+  ingress_serialproxy: false
+  ingress_spiceproxy: false
+  ingress_osapi: false
+  service_ingress_metadata: false
+  service_ingress_novncproxy: false
+  service_ingress_serialproxy: false
+  service_ingress_spiceproxy: false
+  service_ingress_osapi: false
+  service_metadata: false
+  service_novncproxy: false
+  service_serialproxy: false
+  service_spiceproxy: false
+  service_osapi: false
+  job_db_init: false
+  job_db_sync: false
+  job_db_drop: false
+  job_image_repo_sync: false
+  job_ks_endpoints: false
+  job_ks_service: false
+  # Keep ks_user and rabbit_init so this cluster can authenticate to control-plane services
+  job_ks_user: true
+  job_rabbit_init: true
+endpoints:
+  oslo_messaging:
+    host_fqdn_override:
+      default: ${RABBIT_LB_IP}
+  identity:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        internal: 80
+  image:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        public: 80
+        default: 80
+  volumev3:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        public: 80
+        default: 80
+  compute:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        public: 80
+        default: 80
+  placement:
+    host_fqdn_override:
+      default: ${CONTROL_PUBLIC_IP}
+    port:
+      api:
+        default: 80
+EOF
+
+helm upgrade --install nova openstack-helm/nova \
+  --namespace openstack \
+  --wait --timeout=25m \
+  --values /home/ubuntu/osh/openstack-helm/overrides/nova/2025.1-ubuntu_noble.yaml \
+  --values /home/ubuntu/osh/openstack-helm/overrides/nova/nova_compute_only.yaml
