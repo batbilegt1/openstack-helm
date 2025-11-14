@@ -1,13 +1,14 @@
 #!/bin/bash
+set -euo pipefail
 
 # === USER CONFIGURATION ===
 NODES=(
-  "vm1 192.168.122.68"
-  "vm2 192.168.122.54"
-  "vm3 192.168.122.122"
-  "vm4 192.168.122.73"
+  "vm11 192.168.122.69"
+  "vm12 192.168.122.6"
+  "vm13 192.168.122.106"
+  "vm14 192.168.122.201"
 )
-CONTROL_PLANE_HOSTNAME="vm1"
+CONTROL_PLANE_HOSTNAME="vm11"
 USER="ubuntu"
 SSH_KEY="$HOME/.ssh/id_rsa"
 PUB_KEY="${SSH_KEY}.pub"
@@ -119,11 +120,13 @@ helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --set controller.kind=Deployment \
   --set controller.admissionWebhooks.enabled=false \
   --set controller.scope.enabled=true \
-  --set controller.service.enabled=false \
   --set controller.ingressClassResource.name=nginx \
   --set controller.ingressClassResource.controllerValue="k8s.io/ingress-nginx" \
   --set controller.ingressClass=nginx \
-  --set controller.labels.app=ingress-api
+  --set controller.labels.app=ingress-api \
+  --set controller.service.enabled=true \
+  --set controller.service.type=LoadBalancer \
+  --set controller.service.loadBalancerIP=192.168.122.240
 
 tee > /tmp/metallb_system_namespace.yaml <<EOF
 apiVersion: v1
@@ -144,8 +147,8 @@ metadata:
     name: public
     namespace: metallb-system
 spec:
-    addresses:
-    - "172.24.128.0/24"
+  addresses:
+  - "192.168.122.240-192.168.122.249"
 EOF
 
 kubectl apply -f /tmp/metallb_ipaddresspool.yaml
@@ -164,29 +167,6 @@ EOF
 
 kubectl apply -f /tmp/metallb_l2advertisement.yaml
 
-tee > /tmp/openstack_endpoint_service.yaml <<EOF
----
-kind: Service
-apiVersion: v1
-metadata:
-  name: public-openstack
-  namespace: openstack
-  annotations:
-    metallb.universe.tf/loadBalancerIPs: "172.24.128.100"
-spec:
-  externalTrafficPolicy: Cluster
-  type: LoadBalancer
-  selector:
-    app: ingress-api
-  ports:
-    - name: http
-      port: 80
-    - name: https
-      port: 443
-EOF
-
-kubectl apply -f /tmp/openstack_endpoint_service.yaml
-
 kubectl label --overwrite nodes --all openstack-control-plane=enabled
 
 echo "deb https://download.ceph.com/debian-reef/ jammy main" | sudo tee /etc/apt/sources.list.d/ceph.list
@@ -198,11 +178,15 @@ sudo mv /home/ubuntu/ceph.conf /etc/ceph/
 sudo mv /home/ubuntu/ceph.client.*.keyring /etc/ceph/
 sudo chown root:root /etc/ceph/ceph.conf /etc/ceph/ceph.client.*.keyring
 sudo chmod 644 /etc/ceph/ceph.conf
-sudo chmod 600 /etc/ceph/ceph.client.*.keyring
+sudo chmod 644 /etc/ceph/ceph.client.*.keyring
 sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.keyring
 sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
 
+# Ensure no pre-existing keyring secret conflicts; let glance-storage-init create it
+kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
+
+# Refresh ceph-etc ConfigMap with updated ceph.conf (includes client.glance keyfile)
 kubectl -n openstack create configmap ceph-etc \
   --from-file=ceph.conf=/etc/ceph/ceph.conf \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -217,9 +201,9 @@ kubectl get csidrivers
 OPENSTACK_NS="openstack"
 KUBE_SYSTEM_NS="kube-system"
 CEPH_SECRET_NAME="ceph-secret"
-CEPH_KEY="AQAqzQ1pSInIKhAAiecs+MN4nT8PMwF2LaxgpQ=="
-CLUSTER_ID="6e5c1cd1-bbc6-11f0-92ec-525400d7cbaf"
-MONITOR_IP="192.168.122.28:6789"
+CLUSTER_ID=$(sudo ceph fsid)
+MONITOR_IP="192.168.122.102:6789";
+CEPH_KEY=$(sudo awk '/key =/ {print $3}' /etc/ceph/ceph.client.admin.keyring)
 
 kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -
 
@@ -271,8 +255,11 @@ EOF
 
 kubectl get sc -A
 
+kubectl -n openstack delete secret pvc-ceph-client-key --ignore-not-found
 kubectl -n openstack create secret generic pvc-ceph-client-key \
-  --from-literal=key="$CEPH_KEY"
+  --type Opaque \
+  --from-literal=key="$CEPH_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 cd ~/osh/openstack-helm
 
@@ -288,72 +275,90 @@ done
 helm upgrade --install rabbitmq openstack-helm/rabbitmq \
     --namespace=openstack \
     --set pod.replicas.server=1 \
-    --timeout=600s \
+    --wait --timeout=15m \
     $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c rabbitmq ${FEATURES})
 
+# Expose RabbitMQ for AZ cluster via MetalLB
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-external
+  namespace: openstack
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "192.168.122.241"
+spec:
+  type: LoadBalancer
+  selector:
+    application: rabbitmq
+    component: server
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: http
+      port: 15672
+      targetPort: 15672
+EOF
+
 helm upgrade --install mariadb openstack-helm/mariadb \
-    --namespace=openstack \
-    --set pod.replicas.server=1 \
-    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c mariadb ${FEATURES})
+  --namespace=openstack \
+  --set pod.replicas.server=1 \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c mariadb ${FEATURES})
 
 helm upgrade --install memcached openstack-helm/memcached \
-    --namespace=openstack \
-    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c memcached ${FEATURES})
+  --namespace=openstack \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c memcached ${FEATURES})
 
 helm upgrade --install keystone openstack-helm/keystone \
-    --namespace=openstack \
-    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c keystone ${FEATURES})
+  --namespace=openstack \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c keystone ${FEATURES})
 
 helm upgrade --install heat openstack-helm/heat \
-    --namespace=openstack \
-    $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c heat ${FEATURES})
+  --namespace=openstack \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c heat ${FEATURES})
+
+# Placement must be ready before Nova
+helm upgrade --install placement openstack-helm/placement \
+  --namespace=openstack \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c placement ${FEATURES})
 
 tee > ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml <<EOF
 # ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml
+# Purpose: Configure Glance to use Ceph RBD as the image backend.
+
 storage: rbd
 
 conf:
   ceph:
     enabled: true
-    monitors: ["192.168.122.28:6789"]
-    keyring_secret_name: pvc-ceph-client-key   # ← your original key
+    monitors: ["192.168.122.102:6789"]
+    # Align with the secret created/managed by storage-init:
+    # secret/images-rbd-keyring
+    keyring_secret_name: images-rbd-keyring
+
   glance:
-    default_store: rbd
-    stores: rbd
+    # Glance store configuration (multi-backend style)
+    glance_store:
+      enabled_backends: rbd:rbd
+      default_backend: rbd
+      # Some components still consult 'stores' for legacy paths
+      stores: rbd
+    DEFAULT:
+      enabled_backends: rbd:rbd
+
+    # Backend-specific section name matches the backend id above (rbd)
     rbd:
       rbd_store_pool: images
       rbd_store_user: glance
       rbd_store_ceph_conf: /etc/ceph/ceph.conf
       rados_connect_timeout: -1
       report_rbd_errors: true
-      # ← ADD THIS: tell Glance where the key is
-      rbd_store_ceph_keyring: /etc/ceph/keyring
-
-pod:
-  mounts:
-    glance_api:
-      volumeMounts:
-        - name: ceph-etc
-          mountPath: /etc/ceph
-          readOnly: true
-        # ← MOUNT AS /etc/ceph/keyring (not ceph.client.glance.keyring)
-        - name: ceph-keyring
-          mountPath: /etc/ceph/keyring
-          subPath: key
-          readOnly: true
-      volumes:
-        - name: ceph-etc
-          configMap:
-            name: ceph-etc
-            items:
-              - key: ceph.conf
-                path: ceph.conf
-        - name: ceph-keyring
-          secret:
-            secretName: pvc-ceph-client-key
-            items:
-              - key: key
-                path: keyring   # ← this becomes /etc/ceph/keyring
 EOF
 
 helm upgrade --install glance openstack-helm/glance \
@@ -361,14 +366,31 @@ helm upgrade --install glance openstack-helm/glance \
   --values /home/ubuntu/osh/openstack-helm/overrides/glance/2025.1-ubuntu_noble.yaml \
   --values /home/ubuntu/osh/openstack-helm/overrides/glance/glance_ceph.yaml
 
-sudo ceph osd pool application enable images glance-image --yes-i-really-mean-it
+kubectl exec -n openstack glance-api-679547bb99-795d2 -- ceph -s -n client.glance
+kubectl exec -n openstack glance-api-679547bb99-795d2 -- \
+  ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring
 
-GLANCE_POD=$(kubectl get pod -n openstack -l application=glance,component=api -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n openstack $GLANCE_POD -- cat /etc/ceph/ceph.conf
-kubectl exec -n openstack $GLANCE_POD -- cat /etc/ceph/ceph.client.glance.keyring
-kubectl exec -n openstack $GLANCE_POD -- ceph -s
-kubectl exec -n openstack $GLANCE_POD -- rbd -p images ls
+sudo rbd -p images ls
 
+python3 -m venv ~/openstack-client
+source ~/openstack-client/bin/activate
+pip install python-openstackclient
+mkdir -p ~/.config/openstack
+cat << EOF > ~/.config/openstack/clouds.yaml
+clouds:
+  openstack_helm:
+    region_name: RegionOne
+    identity_api_version: 3
+    auth:
+      username: 'admin'
+      password: 'password'
+      project_name: 'admin'
+      project_domain_name: 'default'
+      user_domain_name: 'default'
+      auth_url: 'http://keystone.openstack.svc.cluster.local/v3'
+EOF
+
+source ~/openstack-client/bin/activate
 
 sudo tee ~/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml > /dev/null<<EOF
 cinder:
@@ -378,7 +400,7 @@ cinder:
         volume_driver: cinder.volume.drivers.rbd.RBDDriver
         rbd_pool: volumes
         rbd_ceph_conf: /etc/ceph/ceph.conf
-        rbd_user: volumes
+        rbd_user: cinder
         rbd_secret_uuid: "ce-drivers-not-needed" # optional for Helm
         rbd_flatten_volume_from_snapshot: false
         rbd_max_clone_depth: 5
@@ -396,3 +418,36 @@ helm upgrade --install cinder openstack-helm/cinder \
   --namespace openstack \
   --values /home/ubuntu/osh/openstack-helm/overrides/cinder/2025.1-ubuntu_noble.yaml \
   --values /home/ubuntu/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml
+
+# Neutron server (control-plane only, disable agents here)
+cat > ~/osh/openstack-helm/overrides/neutron/neutron_control_only.yaml <<EOF
+manifests:
+  daemonset_ovs_agent: false
+  daemonset_dhcp_agent: false
+  daemonset_l3_agent: false
+  daemonset_metadata_agent: false
+  daemonset_lb_agent: false
+  deployment_server: true
+  deployment_rpc_server: true
+  ingress_server: true
+  service_server: true
+  service_ingress_server: true
+EOF
+
+helm upgrade --install neutron openstack-helm/neutron \
+  --namespace openstack \
+  --wait --timeout=20m \
+  --values /home/ubuntu/osh/openstack-helm/overrides/neutron/2025.1-ubuntu_noble.yaml \
+  --values /home/ubuntu/osh/openstack-helm/overrides/neutron/neutron_control_only.yaml
+
+# Nova control-plane (API, conductor, scheduler)
+helm upgrade --install nova openstack-helm/nova \
+  --namespace openstack \
+  --wait --timeout=20m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c nova ${FEATURES})
+
+# Horizon dashboard (optional)
+helm upgrade --install horizon openstack-helm/horizon \
+  --namespace openstack \
+  --wait --timeout=15m \
+  $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c horizon ${FEATURES})

@@ -18,41 +18,13 @@ conf:
       default_backend: rbd
       # Some components still consult 'stores' for legacy paths
       stores: rbd
+    DEFAULT:
+      enabled_backends: rbd:rbd
 
     # Backend-specific section name matches the backend id above (rbd)
     rbd:
       rbd_store_pool: images
       rbd_store_user: glance
       rbd_store_ceph_conf: /etc/ceph/ceph.conf
-      # Explicitly point to the mounted keyring path used by the pod
-      rbd_store_ceph_keyring: /etc/ceph/ceph.client.glance.keyring
       rados_connect_timeout: -1
       report_rbd_errors: true
-
-pod:
-  mounts:
-    glance_api:
-      volumeMounts:
-        - name: ceph-etc
-          mountPath: /etc/ceph
-          readOnly: true
-        # Mount the keyring as the conventional path Glance expects
-        - name: ceph-keyring
-          mountPath: /etc/ceph/ceph.client.glance.keyring
-          subPath: ceph.client.glance.keyring
-          readOnly: true
-      volumes:
-        - name: ceph-etc
-          configMap:
-            name: ceph-etc
-            items:
-              - key: ceph.conf
-                path: ceph.conf
-        - name: ceph-keyring
-          secret:
-            # This matches the secret updated by glance-storage-init
-            secretName: images-rbd-keyring
-            items:
-              # The secret data key is 'key', write it to the desired filename
-              - key: key
-                path: ceph.client.glance.keyring
