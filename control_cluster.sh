@@ -183,9 +183,14 @@ sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.ke
 sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
 
-# Ensure no pre-existing keyring secret conflicts; let glance-storage-init create it
-kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
-
+# Ensure ceph.conf has client.glance keyfile stanza (works with raw key secret)
+if ! sudo grep -q "^\[client.glance\]" /etc/ceph/ceph.conf; then
+  sudo tee -a /etc/ceph/ceph.conf > /dev/null <<'EOF'
+[client.glance]
+    keyfile = /etc/ceph/ceph.client.glance.keyring
+    client_mount_timeout = 30
+EOF
+fi
 # Refresh ceph-etc ConfigMap with updated ceph.conf (includes client.glance keyfile)
 kubectl -n openstack create configmap ceph-etc \
   --from-file=ceph.conf=/etc/ceph/ceph.conf \
@@ -272,6 +277,26 @@ for chart in rabbitmq mariadb memcached openvswitch libvirt keystone heat glance
     helm osh get-values-overrides -d -u ${OVERRIDES_URL} -p ${OVERRIDES_DIR} -c ${chart} ${FEATURES}
 done
 
+python3 -m venv ~/openstack-client
+source ~/openstack-client/bin/activate
+pip install python-openstackclient
+mkdir -p ~/.config/openstack
+cat << EOF > ~/.config/openstack/clouds.yaml
+clouds:
+  openstack_helm:
+    region_name: RegionOne
+    identity_api_version: 3
+    auth:
+      username: 'admin'
+      password: 'password'
+      project_name: 'admin'
+      project_domain_name: 'default'
+      user_domain_name: 'default'
+      auth_url: 'http://keystone.openstack.svc.cluster.local/v3'
+EOF
+
+source ~/openstack-client/bin/activate
+
 helm upgrade --install rabbitmq openstack-helm/rabbitmq \
     --namespace=openstack \
     --set pod.replicas.server=1 \
@@ -322,37 +347,25 @@ helm upgrade --install heat openstack-helm/heat \
   --wait --timeout=15m \
   $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c heat ${FEATURES})
 
-# Placement must be ready before Nova
 helm upgrade --install placement openstack-helm/placement \
   --namespace=openstack \
   --wait --timeout=15m \
   $(helm osh get-values-overrides -p ${OVERRIDES_DIR} -c placement ${FEATURES})
 
 tee > ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml <<EOF
-# ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml
-# Purpose: Configure Glance to use Ceph RBD as the image backend.
-
 storage: rbd
-
 conf:
   ceph:
     enabled: true
-    monitors: ["192.168.122.102:6789"]
-    # Align with the secret created/managed by storage-init:
-    # secret/images-rbd-keyring
+    monitors: ["192.168.122.28:6789"]
     keyring_secret_name: images-rbd-keyring
-
   glance:
-    # Glance store configuration (multi-backend style)
     glance_store:
       enabled_backends: rbd:rbd
       default_backend: rbd
-      # Some components still consult 'stores' for legacy paths
       stores: rbd
     DEFAULT:
       enabled_backends: rbd:rbd
-
-    # Backend-specific section name matches the backend id above (rbd)
     rbd:
       rbd_store_pool: images
       rbd_store_user: glance
@@ -361,63 +374,64 @@ conf:
       report_rbd_errors: true
 EOF
 
+kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
 helm upgrade --install glance openstack-helm/glance \
   --namespace openstack \
   --values /home/ubuntu/osh/openstack-helm/overrides/glance/2025.1-ubuntu_noble.yaml \
   --values /home/ubuntu/osh/openstack-helm/overrides/glance/glance_ceph.yaml
 
-kubectl exec -n openstack glance-api-679547bb99-795d2 -- ceph -s -n client.glance
-kubectl exec -n openstack glance-api-679547bb99-795d2 -- \
-  ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring
+GLANCE_API_POD=$(kubectl get pods -n openstack -l app.kubernetes.io/name=glance,app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s -n client.glance
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring
 
 sudo rbd -p images ls
 
-python3 -m venv ~/openstack-client
-source ~/openstack-client/bin/activate
-pip install python-openstackclient
-mkdir -p ~/.config/openstack
-cat << EOF > ~/.config/openstack/clouds.yaml
-clouds:
-  openstack_helm:
-    region_name: RegionOne
-    identity_api_version: 3
-    auth:
-      username: 'admin'
-      password: 'password'
-      project_name: 'admin'
-      project_domain_name: 'default'
-      user_domain_name: 'default'
-      auth_url: 'http://keystone.openstack.svc.cluster.local/v3'
-EOF
-
-source ~/openstack-client/bin/activate
-
 sudo tee ~/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml > /dev/null<<EOF
 cinder:
-  config:
-    cinder.conf:
-      rbd:
+  conf:
+    ceph:
+      enabled: true
+      monitors: ["192.168.122.28:6789"]
+      keyring_secret_name: cinder-rbd-keyring
+    cinder:
+      DEFAULT:
+        enabled_backends: rbd1
+        glance_api_version: 2
+      rbd1:
         volume_driver: cinder.volume.drivers.rbd.RBDDriver
-        rbd_pool: volumes
-        rbd_ceph_conf: /etc/ceph/ceph.conf
+        volume_backend_name: rbd1
+        rbd_pool: cinder.volumes
         rbd_user: cinder
-        rbd_secret_uuid: "ce-drivers-not-needed" # optional for Helm
+        rbd_ceph_conf: /etc/ceph/ceph.conf
+        rados_connect_timeout: -1
         rbd_flatten_volume_from_snapshot: false
         rbd_max_clone_depth: 5
         rbd_store_chunk_size: 4
-        rados_connect_timeout: -1
-        glance_api_version: 2
-
+        report_discard_supported: true
   extra_mounts:
     - name: ceph-conf
       mountPath: /etc/ceph
       hostPath: /etc/ceph
 EOF
 
+# Provide the full cinder keyring to the chart via a secret (like Glance)
+kubectl -n openstack create secret generic cinder-rbd-keyring \
+  --from-file=keyring=/etc/ceph/ceph.client.cinder.keyring \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 helm upgrade --install cinder openstack-helm/cinder \
   --namespace openstack \
   --values /home/ubuntu/osh/openstack-helm/overrides/cinder/2025.1-ubuntu_noble.yaml \
   --values /home/ubuntu/osh/openstack-helm/overrides/cinder/cinder_ceph.yaml
+
+CINDER_VOL_POD=$(kubectl get pods -n openstack -l application=cinder,component=volume -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n openstack "$CINDER_VOL_POD" -- ceph -s -n client.cinder --keyring /etc/ceph/ceph.client.cinder.keyring --conf /etc/ceph/ceph.conf
+kubectl exec -n openstack "$CINDER_VOL_POD" -- rbd -p cinder.volumes ls --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.cinder.keyring -n client.cinder
+
+sudo rbd -p cinder.volumes ls
+
+
+
 
 # Neutron server (control-plane only, disable agents here)
 cat > ~/osh/openstack-helm/overrides/neutron/neutron_control_only.yaml <<EOF
