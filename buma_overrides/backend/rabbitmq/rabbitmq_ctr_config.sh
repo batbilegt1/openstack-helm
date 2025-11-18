@@ -59,11 +59,6 @@ EOF
 
 
 cat ~/overrides/rabbitmq/rabbitmq.yaml
-helm update
-
-helm repo add openstack-helm https://opendev.org/openstack/openstack-helm/raw/branch/master/charts
-helm repo update
-
 helm upgrade --install rabbitmq openstack-helm/rabbitmq \
     --namespace=openstack \
     --set pod.replicas.server=1 \
@@ -81,6 +76,7 @@ kubectl describe svc rabbitmq -n openstack | grep -A 10 "Port:"
 kubectl logs -n openstack rabbitmq-rabbitmq-0 -f --tail=50
 kubectl exec -it -n openstack rabbitmq-rabbitmq-0 -- rabbitmqctl status
 kubectl get endpoints rabbitmq -n openstack
+
 # Арга 3: Шинэ LoadBalancer Service үүсгэх (Аюулгүй)
 cat > ~/rabbitmq-loadbalancer.yaml << 'EOF'
 apiVersion: v1

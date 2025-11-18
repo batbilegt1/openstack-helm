@@ -6,8 +6,7 @@ git clone https://opendev.org/zuul/zuul-jobs.git
 
 sudo apt install python3-pip -y
 sudo apt install ansible -y
-
-
+ssh-keygen -t rsa -N "" -f /home/ubuntu/.ssh/id_rsa
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.10
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.11
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.12
@@ -71,6 +70,36 @@ all:
         control-plane:
 EOF
 
+cat > ~/osh/deploy-env.yaml <<EOF
+---
+- hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - ensure-python
+    - ensure-pip
+    - clear-firewall
+    # - deploy-env
+EOF
+
+export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
+ansible-playbook -i inventory.yaml deploy-env.yaml
+
+cat > ~/osh/deploy-env.yaml <<EOF
+---
+- hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - deploy-env
+EOF
+
+export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
+ansible-playbook -i inventory.yaml deploy-env.yaml
+
+# Ajillaj baih yavtsad
+# kubectl edit configmap calico-config -n kube-system
+# deer veth_mtu=1450 bolgo
 
 cat > ~/osh/pre_task.yaml <<EOF
 ---
@@ -117,32 +146,3 @@ cat > ~/osh/pre_task.yaml <<EOF
 EOF
 
 ansible-playbook -i inventory.yaml pre_task.yaml
-
-cat > ~/osh/deploy-env.yaml <<EOF
----
-- hosts: all
-  become: true
-  gather_facts: true
-  roles:
-    - ensure-python
-    - ensure-pip
-    - clear-firewall
-    # - deploy-env
-EOF
-
-export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
-ansible-playbook -i inventory.yaml deploy-env.yaml
-
-cat > ~/osh/deploy-env.yaml <<EOF
----
-- hosts: all
-  become: true
-  gather_facts: true
-  roles:
-    - deploy-env
-EOF
-
-export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
-ansible-playbook -i inventory.yaml deploy-env.yaml
-ansible-playbook -i inventory.yaml deploy-env.yaml --start-at-task 'Include K8s client tasks'
-

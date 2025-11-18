@@ -1,4 +1,64 @@
+cat > ~/overrides/keystone/keystone-api.yaml <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: keystone-api
+  namespace: openstack
+  annotations:
+    meta.helm.sh/release-name: keystone
+    meta.helm.sh/release-namespace: openstack
+    metallb.universe.tf/address-pool: public
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 10.4.0.35
+  selector:
+    app.kubernetes.io/component: api
+    app.kubernetes.io/instance: keystone
+    app.kubernetes.io/name: keystone
+    application: keystone
+    component: api
+    release_group: keystone
+  ports:
+  - name: ks-pub
+    port: 5000
+    protocol: TCP
+    targetPort: 5000
+  # - name: http
+  #   port: 80
+  #   protocol: TCP
+  #   targetPort: 80
+  # - name: https
+  #   port: 443
+  #   protocol: TCP
+  #   targetPort: 443
+EOF
+kubectl apply -f ~/overrides/keystone/keystone-api.yaml
 
+cat > keystone-external.yaml << 'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    meta.helm.sh/release-name: keystone
+    meta.helm.sh/release-namespace: openstack
+  name: keystone
+  namespace: openstack
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 10.4.0.38
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: 443
+  selector:
+    app: ingress-api
+EOF
+kubectl apply -f keystone-external.yaml
 
 cat > ~/overrides/keystone/keystone.yaml <<EOF
 ---
@@ -26,7 +86,7 @@ images:
     keystone_fernet_rotate: "quay.io/airshipit/keystone:2025.1-ubuntu_noble"
     keystone_fernet_setup: "quay.io/airshipit/keystone:2025.1-ubuntu_noble"
     ks_user: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
-
+conf:
   wsgi_script_name: wsgi.py
 endpoints:
   identity:
@@ -54,7 +114,6 @@ endpoints:
       default: keystone
       internal: keystone-api
     host_fqdn_override:
-      default: keystone
       internal: keystone-api
     path:
       default: /v3
@@ -147,90 +206,63 @@ manifests:
 ...
 EOF
 
-kubectl exec -n openstack tmp-mysql-client -- mysql -h mariadb -u openstack -p'OpenstackDBPass123' -e "SHOW DATABASES;"
-kubectl exec -n openstack tmp-mysql-client -- mysql -h mariadb -u keystone -p'password' -e "SHOW DATABASES;"
+helm upgrade --install keystone openstack-helm/keystone \
+  --namespace openstack \
+  --values ~/overrides/keystone/keystone.yaml
+
+# manifests:
+#   certificates: false
+#   configmap_bin: true
+#   configmap_etc: true
+#   cron_credential_rotate: true
+#   cron_fernet_rotate: true
+#   deployment_api: true
+#   ingress_api: true
+#   job_bootstrap: true
+#   job_credential_cleanup: true
+#   job_credential_setup: true
+#   job_db_init: true
+#   job_db_sync: true
+#   job_db_drop: false
+#   job_domain_manage: true
+#   job_fernet_setup: true
+#   job_image_repo_sync: true
+#   job_rabbit_init: true
+#   pdb_api: true
+#   pod_rally_test: true
+#   network_policy: false
+#   secret_credential_keys: true
+#   secret_db: true
+#   secret_fernet_keys: true
+#   secret_ingress_tls: true
+#   secret_keystone: true
+#   secret_rabbitmq: true
+#   secret_registry: true
+#   service_ingress_api: false
+#   service_api: false
+
+# Health and root endpoint via MetalLB IP
+curl -vk http://10.4.0.35:5000/healthcheck
+curl -vk http://10.4.0.35:5000/v3/
+
+# Cleanup previous deployment
 helm uninstall keystone -n openstack
 kubectl delete pvc -n openstack -l application=keystone
 kubectl delete pod -n openstack -l application=keystone
 kubectl delete job -n openstack -l application=keystone
-kubectl delete svc -n openstack -l application=keystone
 kubectl delete cronjob -n openstack -l application=keystone
 kubectl delete secret -n openstack -l application=keystone
 kubectl delete secret -n openstack $(kubectl get secret -n openstack | grep keystone | awk '{print $1}')
 kubectl delete deployment -n openstack -l application=keystone
 kubectl delete statefulset -n openstack -l application=keystone
 
-helm upgrade --install keystone openstack-helm/keystone \
-  --namespace openstack \
-  --values ~/overrides/keystone/keystone.yaml
 
-ku
 
 helm repo add openstack-helm https://opendev.org/openstack/openstack-helm/raw/branch/master/charts
-helm repo add openstack-helm https://tarballs.opendev.org/openstack/openstack-helm
 helm repo update
 
-cat > ~/overrides/keystone/keystone-api.yaml <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: keystone-api
-  namespace: openstack
-  annotations:
-    meta.helm.sh/release-name: keystone
-    meta.helm.sh/release-namespace: openstack
-    metallb.universe.tf/address-pool: public
-spec:
-  type: LoadBalancer
-  loadBalancerIP: 10.4.0.35
-  selector:
-    app.kubernetes.io/component: api
-    app.kubernetes.io/instance: keystone
-    app.kubernetes.io/name: keystone
-    application: keystone
-    component: api
-    release_group: keystone
-  ports:
-  - name: ks-pub
-    port: 5000
-    protocol: TCP
-    targetPort: 5000
-  # - name: http
-  #   port: 80
-  #   protocol: TCP
-  #   targetPort: 80
-  # - name: https
-  #   port: 443
-  #   protocol: TCP
-  #   targetPort: 443
-EOF
 
-kubectl apply -f ~/overrides/keystone/keystone-api.yaml
-cat > keystone-external.yaml << 'EOF'
-apiVersion: v1
-kind: Service
-metadata:
-  annotations:
-    meta.helm.sh/release-name: keystone
-    meta.helm.sh/release-namespace: openstack
-  name: keystone
-  namespace: openstack
-spec:
-  type: LoadBalancer
-  loadBalancerIP: 10.4.0.38
-  ports:
-  - name: http
-    port: 80
-    protocol: TCP
-    targetPort: 80
-  - name: https
-    port: 443
-    protocol: TCP
-    targetPort: 443
-  selector:
-    app: ingress-api
-EOF
-kubectl apply -f keystone-external.yaml
+
 
 curl -sS http://10.3.0.35:5000/v3/
 curl -sS http://10.3.0.38:80/v3/
@@ -422,7 +454,7 @@ helm repo update
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   --namespace ingress-nginx --create-namespace \
   --set controller.service.type=LoadBalancer \
-  --set controller.service.loadBalancerIP=10.4.0.24
+  --set controller.service.loadBalancerIP=10.3.0.24
 kubectl get svc -n ingress-nginx -o wide
 
 
@@ -493,6 +525,3 @@ kubectl get pods -n openstack -o wide
 
 
 sudo -- sh -c 'echo "10.3.0.24 keystone rabbitmq-mgr-7b1733 keystone.openstack" >> /etc/hosts'
-
-
-
