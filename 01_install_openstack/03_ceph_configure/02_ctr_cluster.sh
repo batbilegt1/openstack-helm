@@ -36,7 +36,7 @@ OPENSTACK_NS="openstack"
 KUBE_SYSTEM_NS="kube-system"
 CEPH_SECRET_NAME="ceph-secret"
 CLUSTER_ID=$(sudo ceph fsid)
-MONITOR_IP="192.168.122.102:6789";
+MONITOR_IP="10.3.0.18:6789";
 CEPH_KEY=$(sudo awk '/key =/ {print $3}' /etc/ceph/ceph.client.admin.keyring)
 
 kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -

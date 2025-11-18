@@ -1,11 +1,11 @@
 
-mkdir -p ~/osh/openstack-helm/overrides/glance
-tee > ~/osh/openstack-helm/overrides/glance/glance_ceph.yaml <<EOF
+cat > ~/overrides/glance/glance.yaml <<EOF
+---
 storage: rbd
 conf:
   ceph:
     enabled: true
-    monitors: ["192.168.122.28:6789"]
+    monitors: ["10.3.0.18:6789"]
     keyring_secret_name: images-rbd-keyring
   glance:
     glance_store:
@@ -20,20 +20,137 @@ conf:
       rbd_store_ceph_conf: /etc/ceph/ceph.conf
       rados_connect_timeout: -1
       report_rbd_errors: true
+images:
+  tags:
+    bootstrap: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    db_init: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    db_drop: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    ks_user: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    ks_service: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    ks_endpoints: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
+    glance_db_sync: "quay.io/airshipit/glance:2025.1-ubuntu_noble"
+    glance_api: "quay.io/airshipit/glance:2025.1-ubuntu_noble"
+    glance_metadefs_load: "quay.io/airshipit/glance:2025.1-ubuntu_noble"
+    glance_storage_init: "docker.io/openstackhelm/ceph-config-helper:latest-ubuntu_jammy"
+endpoints:
+  cluster_domain_suffix: cluster.local
+  identity:
+    name: keystone
+    auth:
+      admin:
+        region_name: RegionOne
+        username: admin
+        password: KeystoneAdminPass
+        project_name: admin
+        user_domain_name: default
+        project_domain_name: default
+      glance:
+        role: admin
+        region_name: RegionOne
+        username: glance
+        password: KeystoneGlancePass
+        project_name: service
+        user_domain_name: service
+        project_domain_name: service
+      test:
+        role: admin
+        region_name: RegionOne
+        username: glance-test
+        password: password
+        project_name: test
+        user_domain_name: service
+        project_domain_name: service
+    hosts:
+      default: keystone
+      internal: keystone-api
+    host_fqdn_override:
+      default: keystone
+      internal: keystone-api
+    path:
+      default: /v3
+    scheme:
+      default: http
+    port:
+      api:
+        default: 80
+        internal: 5000
+  image:
+    name: glance
+    hosts:
+      default: glance-api
+      public: glance
+    host_fqdn_override:
+      default: glance-api
+      public: glance
+    path:
+      default: null
+      healthcheck: /healthcheck
+    scheme:
+      default: http
+      service: http
+    port:
+      api:
+        default: 9292
+        public: 9292
+  oslo_db:
+    auth:
+      admin:
+        username: root
+        password: mariadbRootPass
+        secret:
+          tls:
+            internal: mariadb-tls-direct
+      glance:
+        username: glance
+        password: glanceDBPass
+    hosts:
+      default: mariadb
+    host_fqdn_override:
+      default: null
+    path: /glance
+    scheme: mysql+pymysql
+    port:
+      mysql:
+        default: 3306
+  oslo_messaging:
+    auth:
+      admin:
+        username: rabbitmq
+        password: RabbitMQPass
+        secret:
+          tls:
+            internal: rabbitmq-tls-direct
+      glance:
+        username: glance
+        password: glanceRabbitMQPass
+    statefulset:
+      replicas: 2
+      name: rabbitmq-rabbitmq
+    hosts:
+      default: rabbitmq
+    host_fqdn_override:
+      default: null
+    path: /glance
+    scheme: rabbit
+    port:
+      amqp:
+        default: 5672
+      http:
+        default: 15672
+...
 EOF
 
 kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
+
 helm upgrade --install glance openstack-helm/glance \
-  --namespace openstack \
-  --values /home/ubuntu/osh/openstack-helm/overrides/glance/2025.1-ubuntu_noble.yaml \
-  --values /home/ubuntu/osh/openstack-helm/overrides/glance/glance_ceph.yaml
+    --namespace=openstack \
+    --values ~/overrides/glance/glance.yaml
 
+# Wait and verify Ceph connectivity from inside the Glance API pod
 GLANCE_API_POD=$(kubectl get pods -n openstack -l app.kubernetes.io/name=glance,app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s -n client.glance
-kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring
-
-sudo rbd -p images ls
-
+kubectl wait -n openstack --for=condition=ContainersReady pod/$GLANCE_API_POD --timeout=180s || true
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s -n client.glance || true
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring || true
 
 helm uninstall glance -n openstack 
 # kubectl delete pvc -n openstack -l application=glance
