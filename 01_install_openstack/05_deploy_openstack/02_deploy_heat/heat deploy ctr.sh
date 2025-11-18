@@ -269,13 +269,12 @@ EOF
 helm osh get-values-overrides -p ${OVERRIDES_DIR} -c heat ${FEATURES}
 --values /home/ubuntu/overrides/heat/2025.1-ubuntu_noble.yaml
 
+
+
 helm upgrade --install heat openstack-helm/heat \
     --namespace=openstack \
     --values ~/overrides/heat/heat.yaml 
 helm osh wait-for-pods openstack
-
-
-
 
 
 
