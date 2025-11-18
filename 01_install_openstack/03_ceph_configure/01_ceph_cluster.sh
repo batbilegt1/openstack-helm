@@ -4,7 +4,7 @@ wget -q -O- https://download.ceph.com/keys/release.gpg | sudo gpg --dearmor -o /
 sudo apt update
 sudo apt install -y cephadm ceph-common lvm2
 
-sudo cephadm bootstrap --mon-ip 192.168.122.102 \
+sudo cephadm bootstrap --mon-ip 10.0.3.18 \
   --initial-dashboard-user admin \
   --initial-dashboard-password 'password'
 
@@ -115,7 +115,7 @@ sudo cp /etc/ceph/ceph.client.*.keyring /tmp/
 sudo cp /etc/ceph/ceph.conf /tmp/
 sudo chmod 644 /tmp/ceph.client.*.keyring /tmp/ceph.conf
 
-scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@192.168.122.69:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@192.168.122.69:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@192.168.122.230:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@192.168.122.230:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@10.0.3.10:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@10.0.3.10:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@10.0.3.14:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@10.0.3.14:/home/ubuntu/

@@ -1,27 +1,25 @@
 
-mkdir -p ~/overrides/glance
 cat > ~/overrides/glance/glance.yaml <<EOF
 ---
-storage: ceph
+storage: rbd
 conf:
-#   ceph:
-#     monitors: [10.10.0.12:6789]
-#     admin_keyring: pvc-ceph-client-key
-#   glance:
-#     glance_store:
-#       rbd_store_pool: images
-#       rbd_store_user: glance
-#       rbd_store_ceph_conf: /etc/ceph/ceph.conf
-#     rbd:
-#       rbd_store_pool: images
-#       rbd_store_user: glance
-#       rbd_store_ceph_conf: /etc/ceph/ceph.conf
   ceph:
-    rbd_store_pool: images
-    rbd_store_user: glance
-    rados_connect_timeout: 0
-    secret_name: pvc-ceph-client-key
-    ceph_conf: /etc/ceph/ceph.conf
+    enabled: true
+    monitors: ["10.3.0.18:6789"]
+    keyring_secret_name: images-rbd-keyring
+  glance:
+    glance_store:
+      enabled_backends: rbd:rbd
+      default_backend: rbd
+      stores: rbd
+    DEFAULT:
+      enabled_backends: rbd:rbd
+    rbd:
+      rbd_store_pool: images
+      rbd_store_user: glance
+      rbd_store_ceph_conf: /etc/ceph/ceph.conf
+      rados_connect_timeout: -1
+      report_rbd_errors: true
 images:
   tags:
     bootstrap: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
@@ -141,24 +139,18 @@ endpoints:
         default: 15672
 ...
 EOF
-kubectl create configmap ceph-etc \
-  --from-literal=ceph.conf="$(kubectl get secret pvc-ceph-conf -n openstack -o jsonpath='{.data.ceph\.conf}' | base64 --decode)" \
-  -n openstack
 
-
-kubectl create configmap ceph-etc \
-  --from-file=/etc/ceph/ceph.conf \
-  --from-file=/etc/ceph/ceph.client.admin.keyring=/etc/ceph/ceph.client.admin.keyring \
-  -n openstack
-
-
-helm repo add openstack-helm https://opendev.org/openstack/openstack-helm/raw/branch/master/charts
-helm repo update
+kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
 
 helm upgrade --install glance openstack-helm/glance \
     --namespace=openstack \
     --values ~/overrides/glance/glance.yaml
 
+# Wait and verify Ceph connectivity from inside the Glance API pod
+GLANCE_API_POD=$(kubectl get pods -n openstack -l app.kubernetes.io/name=glance,app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
+kubectl wait -n openstack --for=condition=ContainersReady pod/$GLANCE_API_POD --timeout=180s || true
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s -n client.glance || true
+kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring || true
 
 helm uninstall glance -n openstack 
 # kubectl delete pvc -n openstack -l application=glance
