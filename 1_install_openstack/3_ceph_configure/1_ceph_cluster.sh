@@ -1,19 +1,17 @@
 
-echo "deb https://download.ceph.com/debian-reef/ noble main" | sudo tee /etc/apt/sources.list.d/ceph.list
+echo "deb https://download.ceph.com/debian-reef/ jammy main" | sudo tee /etc/apt/sources.list.d/ceph.list
 wget -q -O- https://download.ceph.com/keys/release.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ceph.gpg
 sudo apt update
 sudo apt install -y cephadm ceph-common lvm2
 
-sudo cephadm bootstrap --mon-ip 10.3.0.18 \
+sudo cephadm bootstrap --mon-ip 192.168.122.102 \
   --initial-dashboard-user admin \
   --initial-dashboard-password 'password'
 
 sudo ceph -s
 sudo cephadm shell
 ceph orch device ls
-ceph orch daemon add osd ceph8:/dev/vdb
-ceph orch daemon add osd ceph8:/dev/vdc
-ceph orch daemon add osd ceph8:/dev/vdd
+ceph orch daemon add osd vm19:/dev/vdb
 ceph config set mon mon_allow_pool_size_one true
 
 ceph osd pool create volumes 32
@@ -117,10 +115,7 @@ sudo cp /etc/ceph/ceph.client.*.keyring /tmp/
 sudo cp /etc/ceph/ceph.conf /tmp/
 sudo chmod 644 /tmp/ceph.client.*.keyring /tmp/ceph.conf
 
-ssh-keygen -t rsa -N "" -f /home/ubuntu/.ssh/id_rsa
-ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.10
-ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.14
-scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@10.3.0.10:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@10.3.0.10:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@10.3.0.14:/home/ubuntu/
-scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@10.3.0.14:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@192.168.122.69:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@192.168.122.69:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.conf ubuntu@192.168.122.230:/home/ubuntu/
+scp -i ~/.ssh/id_rsa /tmp/ceph.client.*.keyring ubuntu@192.168.122.230:/home/ubuntu/

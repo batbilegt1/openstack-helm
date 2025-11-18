@@ -101,6 +101,11 @@ ansible-playbook -i inventory.yaml deploy-env.yaml
 # kubectl edit configmap calico-config -n kube-system
 # deer veth_mtu=1450 bolgo
 
+kubectl label --overwrite nodes --all openstack-control-plane=enabled
+
+rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+helm plugin list
+
 cat > ~/osh/pre_task.yaml <<EOF
 ---
 - hosts: all

@@ -179,27 +179,6 @@ sudo mv /home/ubuntu/ceph.client.*.keyring /etc/ceph/
 sudo chown root:root /etc/ceph/ceph.conf /etc/ceph/ceph.client.*.keyring
 sudo chmod 644 /etc/ceph/ceph.conf
 sudo chmod 644 /etc/ceph/ceph.client.*.keyring
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 sudo ceph -s --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.admin.keyring
 sudo chmod 644 /etc/ceph/ceph.client.admin.keyring
 ceph -s --keyring /etc/ceph/ceph.client.admin.keyring
@@ -228,7 +207,7 @@ OPENSTACK_NS="openstack"
 KUBE_SYSTEM_NS="kube-system"
 CEPH_SECRET_NAME="ceph-secret"
 CLUSTER_ID=$(sudo ceph fsid)
-MONITOR_IP="10.3.0.18:6789";
+MONITOR_IP="192.168.122.102:6789";
 CEPH_KEY=$(sudo awk '/key =/ {print $3}' /etc/ceph/ceph.client.admin.keyring)
 
 kubectl create namespace $OPENSTACK_NS --dry-run=client -o yaml | kubectl apply -f -

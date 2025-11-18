@@ -95,6 +95,13 @@ EOF
 
 export ANSIBLE_ROLES_PATH=~/osh/openstack-helm/roles:~/osh/zuul-jobs/roles
 ansible-playbook -i inventory.yaml deploy-env.yaml
+
+kubectl label --overwrite nodes --all openstack-compute-node=enabled
+kubectl label --overwrite nodes --all openvswitch=enabled
+
+rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+helm plugin list
+
 ansible-playbook -i inventory.yaml deploy-env.yaml --start-at-task 'Include Metallb tasks'
 cat > ~/osh/pre_task.yaml <<EOF
 ---
