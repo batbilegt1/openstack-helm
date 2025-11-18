@@ -1,4 +1,4 @@
-echo "deb https://download.ceph.com/debian-reef/ jammy main" | sudo tee /etc/apt/sources.list.d/ceph.list
+echo "deb https://download.ceph.com/debian-reef/ noble main" | sudo tee /etc/apt/sources.list.d/ceph.list
 wget -q -O- https://download.ceph.com/keys/release.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ceph.gpg
 sudo apt update
 sudo apt install -y cephadm ceph-common lvm2
