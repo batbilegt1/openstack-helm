@@ -167,6 +167,8 @@ kubectl wait -n openstack --for=condition=ContainersReady pod/$GLANCE_API_POD --
 kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s -n client.glance || true
 kubectl exec -n openstack "$GLANCE_API_POD" -- ceph -s --id glance --keyring /etc/ceph/ceph.client.glance.keyring || true
 
+sudo rbd -p images ls
+
 helm uninstall glance -n openstack 
 # kubectl delete pvc -n openstack -l application=glance
 kubectl delete pod -n openstack -l application=glance

@@ -1,8 +1,30 @@
 
-cat > ~/overrides/cinder/cinder.yaml <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-create cinder keyring secret if not present (chart expects type kubernetes.io/rbd and key name 'keyring').
+if ! kubectl -n openstack get secret cinder-rbd-keyring >/dev/null 2>&1; then
+  if [ -f /etc/ceph/ceph.client.cinder.keyring ]; then
+    kubectl -n openstack create secret generic cinder-rbd-keyring \
+      --type=kubernetes.io/rbd \
+      --from-file=keyring=/etc/ceph/ceph.client.cinder.keyring
+  else
+    echo "Missing /etc/ceph/ceph.client.cinder.keyring; create Ceph auth client.cinder first." >&2
+  fi
+fi
+
+# Ensure pool application label is set idempotently.
+if ! ceph osd pool application get cinder.volumes 2>/dev/null | grep -q cinder-volume; then
+  if ! ceph osd pool application enable cinder.volumes cinder-volume >/dev/null 2>&1; then
+    ceph osd pool application enable cinder.volumes cinder-volume --yes-i-really-mean-it || true
+  fi
+fi
+
+cat > ~/overrides/cinder/cinder-overrides.yaml <<EOF
 ---
 storage: ceph
 
+# Node placement
 labels:
   api:
     node_selector_key: openstack-control-plane
@@ -22,38 +44,37 @@ labels:
   volume:
     node_selector_key: openstack-control-plane
     node_selector_value: enabled
+
+# Configuration (structure aligned with openstack-helm/cinder chart values)
 conf:
-  rbd:
-    volume_driver: cinder.volume.drivers.rbd.RBDDriver
-    rbd_pool: volumes
-    rbd_ceph_conf: /etc/ceph/ceph.conf
-    rbd_user: volumes
-    rbd_secret_uuid: "ce-drivers-not-needed" # optional for Helm
-    rbd_flatten_volume_from_snapshot: false
-    rbd_max_clone_depth: 5
-    rbd_store_chunk_size: 4
-    rados_connect_timeout: -1
-    glance_api_version: 2
-  # backends:
-  #   rbd1:
-  #     volume_driver: cinder.volume.drivers.rbd.RBDDriver
-  #     volume_backend_name: rbd1
-  #     rbd_pool: volumes
-  #     rbd_user: volumes
-  #     rbd_ceph_conf: "/etc/ceph/ceph.conf"
-  #     rbd_secret_uuid: 457eb676-33da-42ec-9a8c-9293d545c337
-  #     rbd_flatten_volume_from_snapshot: false
-  #     rbd_max_clone_depth: 5
-  #     rbd_store_chunk_size: 4
-  #     rados_connect_timeout: -1
-  #     image_volume_cache_enabled: true
-  #     image_volume_cache_max_size_gb: 200
-  #     image_volume_cache_max_count: 50
-  #     report_discard_supported: true
+  ceph:
+    enabled: true
+    # Include both v1 and v2 messenger ports if mon supports v2.
+    monitors:
+      - 10.3.0.18:6789
+      - 10.3.0.18:3300
+    keyring_secret_name: cinder-rbd-keyring
+  cinder:
+    DEFAULT:
+      enabled_backends: rbd1
+      glance_api_version: 2
+    rbd1:
+      volume_driver: cinder.volume.drivers.rbd.RBDDriver
+      volume_backend_name: rbd1
+      rbd_pool: cinder.volumes
+      rbd_user: cinder
+      rbd_ceph_conf: /etc/ceph/ceph.conf
+      rados_connect_timeout: -1
+      rbd_flatten_volume_from_snapshot: false
+      rbd_max_clone_depth: 5
+      rbd_store_chunk_size: 4
+      report_discard_supported: true
+
 extra_mounts:
   - name: ceph-conf
     mountPath: /etc/ceph
     hostPath: /etc/ceph
+
 images:
   tags:
     db_init: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
@@ -71,6 +92,7 @@ images:
     cinder_storage_init: "docker.io/openstackhelm/ceph-config-helper:latest-ubuntu_jammy"
     cinder_backup: "quay.io/airshipit/cinder:2025.1-ubuntu_noble"
     cinder_backup_storage_init: "docker.io/openstackhelm/ceph-config-helper:latest-ubuntu_jammy"
+
 endpoints:
   cluster_domain_suffix: cluster.local
   identity:
@@ -247,12 +269,19 @@ endpoints:
         default: 5672
       http:
         default: 15672
-...
 EOF
+
 helm upgrade --install cinder openstack-helm/cinder \
-    --namespace=openstack \
-    --timeout=600s \
-    --values ~/overrides/cinder/cinder.yaml
+  --namespace openstack \
+  --timeout 600s \
+  --values ~/overrides/cinder/cinder-overrides.yaml
+
+CINDER_VOL_POD=$(kubectl get pods -n openstack -l application=cinder,component=volume -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n openstack "$CINDER_VOL_POD" -- ceph -s -n client.cinder --keyring /etc/ceph/ceph.client.cinder.keyring --conf /etc/ceph/ceph.conf
+kubectl exec -n openstack "$CINDER_VOL_POD" -- rbd -p cinder.volumes ls --conf /etc/ceph/ceph.conf --keyring /etc/ceph/ceph.client.cinder.keyring -n client.cinder
+
+sudo rbd -p cinder.volumes ls
+
 
 
 
@@ -261,11 +290,6 @@ kubectl delete pvc -n openstack -l application=cinder
 kubectl delete pod -n openstack -l application=cinder
 kubectl delete job -n openstack -l application=cinder
 kubectl delete svc -n openstack -l application=cinder
-
-
-
-
-
 
 cat > ~/overrides/cinder/cinder-api-external.yaml << 'EOF'
 apiVersion: v1
