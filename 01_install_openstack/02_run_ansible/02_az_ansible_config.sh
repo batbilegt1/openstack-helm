@@ -346,7 +346,8 @@ cat > ~/osh/openstack-helm/roles/deploy-env/tasks/coredns_resolver.yaml << 'EOF'
             hosts {
               10.4.0.33 rabbitmq
               10.4.0.36 metadata
-              10.4.0.35 keystone
+              10.4.0.35 keystone-api
+              10.4.0.38 keystone
               10.4.0.39 glance-api glance
               10.4.0.40 neutron-server neutron
               10.4.0.41 cinder-api cinder

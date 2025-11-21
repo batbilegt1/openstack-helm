@@ -1,4 +1,4 @@
-
+sudo su
 mkdir ~/osh
 cd ~/osh
 git clone https://opendev.org/openstack/openstack-helm.git
