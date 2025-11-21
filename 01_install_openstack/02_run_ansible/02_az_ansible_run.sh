@@ -11,12 +11,11 @@ ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.14
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.15
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.16
 ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.17
-ssh-copy-id -i /home/ubuntu/.ssh/id_rsa.pub ubuntu@10.10.0.18
 cat > ~/osh/inventory.yaml <<EOF
 ---
 all:
   vars:
-    ansible_port: 707
+    ansible_port: 22
     ansible_user: ubuntu
     ansible_ssh_private_key_file: "/home/ubuntu/.ssh/id_rsa"
     ansible_ssh_extra_args: -o StrictHostKeyChecking=no
@@ -99,8 +98,8 @@ ansible-playbook -i inventory.yaml deploy-env.yaml
 kubectl label --overwrite nodes --all openstack-compute-node=enabled
 kubectl label --overwrite nodes --all openvswitch=enabled
 
-rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
-helm plugin list
+# rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+# helm plugin list
 
 ansible-playbook -i inventory.yaml deploy-env.yaml --start-at-task 'Include Metallb tasks'
 cat > ~/osh/pre_task.yaml <<EOF
