@@ -141,10 +141,25 @@ endpoints:
 EOF
 
 kubectl -n openstack delete secret images-rbd-keyring --ignore-not-found
+# Ensure ceph.conf has mon_host; inject if missing (uses msgr2 + v1 for 10.3.0.18)
+if ! grep -q '^mon_host' /etc/ceph/ceph.conf; then
+  FSID=$(sudo ceph fsid 2>/dev/null || echo unknown)
+  sudo bash -c "echo '[global]' > /tmp/ceph.conf.tmp";
+  sudo bash -c "echo 'fsid = ${FSID}' >> /tmp/ceph.conf.tmp";
+  sudo bash -c "echo 'mon_host = v2:10.3.0.18:3300/0,v1:10.3.0.18:6789/0' >> /tmp/ceph.conf.tmp";
+  # Preserve existing client sections
+  sudo awk '/^\[/ {print}' /etc/ceph/ceph.conf >> /tmp/ceph.conf.tmp || true
+  sudo cp /tmp/ceph.conf.tmp /etc/ceph/ceph.conf
+fi
+# Refresh ceph-etc ConfigMap so Glance mounts correct ceph.conf
+kubectl -n openstack create configmap ceph-etc \
+  --from-file=ceph.conf=/etc/ceph/ceph.conf \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install glance openstack-helm/glance \
     --namespace=openstack \
-    --values ~/overrides/glance/glance.yaml
+    --values ~/overrides/glance/glance.yaml \
+    --timeout 20m --wait=false
 
 # Wait and verify Ceph connectivity from inside the Glance API pod
 GLANCE_API_POD=$(kubectl get pods -n openstack -l app.kubernetes.io/name=glance,app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')
