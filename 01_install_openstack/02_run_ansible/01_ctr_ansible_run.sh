@@ -1,4 +1,4 @@
-
+sudo su
 mkdir ~/osh
 cd ~/osh
 git clone https://opendev.org/openstack/openstack-helm.git
@@ -103,8 +103,8 @@ ansible-playbook -i inventory.yaml deploy-env.yaml
 
 kubectl label --overwrite nodes --all openstack-control-plane=enabled
 
-rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
-helm plugin list
+# rm -rf ~/.local/share/helm/plugins/openstack-helm-plugin.git
+# helm plugin list
 
 cat > ~/osh/pre_task.yaml <<EOF
 ---

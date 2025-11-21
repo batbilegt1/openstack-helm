@@ -1,7 +1,3 @@
-
-mkdir -p ~/overrides/placement
-
-
 cat > ~/overrides/placement/placement.yaml <<EOF
 ---
 labels:
@@ -169,6 +165,7 @@ manifests:
   service: false
 ...
 EOF
+
 helm upgrade --install placement openstack-helm/placement \
     --namespace=openstack \
     --values ~/overrides/placement/placement.yaml
