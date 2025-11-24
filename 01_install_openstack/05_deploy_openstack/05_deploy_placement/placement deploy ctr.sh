@@ -1,5 +1,6 @@
 cat > ~/overrides/placement/placement.yaml <<EOF
 ---
+# Placement chart overrides (simplified)
 labels:
   api:
     node_selector_key: openstack-control-plane
@@ -11,68 +12,30 @@ images:
   pull_policy: IfNotPresent
   tags:
     placement: "quay.io/airshipit/placement:2025.1-ubuntu_noble"
+    placement_db_sync: "quay.io/airshipit/placement:2025.1-ubuntu_noble"
     ks_user: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
     ks_service: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
     ks_endpoints: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
     db_init: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
     db_drop: "quay.io/airshipit/heat:2025.1-ubuntu_noble"
-    placement_db_sync: "quay.io/airshipit/placement:2025.1-ubuntu_noble"
     dep_check: "quay.io/airshipit/kubernetes-entrypoint:latest-ubuntu_focal"
-    image_repo_sync: "docker.io/docker:17.07.0"
-# conf:
-#   placement:
-#     placement:
-#       auth_strategy: keystone
-#     api:
-#       auth_strategy: keystone
-#   wsgi_placement: |
-#     Listen 0.0.0.0:8778
-    
-#     <VirtualHost *:8778>
-#       ServerName placement-api.openstack.svc.cluster.local:8778
-#       ServerAlias placement.openstack.svc.cluster.local:8778
-      
-#       WSGIScriptAlias / /var/www/cgi-bin/placement/placement-api
-#       WSGIDaemonProcess placement-api processes=2 threads=10 user=placement group=placement display-name=%{GROUP}
-#       WSGIProcessGroup placement-api
-#       WSGIApplicationGroup %{GLOBAL}
-#       WSGIPassAuthorization On
-      
-#       # Set the proper scheme for URL generation
-#       SetEnvIf X-Forwarded-Proto https HTTPS=1
-      
-#       ErrorLog /dev/stdout
-#       CustomLog /dev/stdout combined
-      
-#       <Directory /var/www/cgi-bin/placement>
-#         Require all granted
-#       </Directory>
-#     </VirtualHost>
-
-# dependencies:
-#   static:
-#     db_sync:
-#       jobs:
-#         - placement-db-init
+conf:
+  placement:
+    placement:
+      auth_strategy: keystone
+    api:
+      auth_strategy: keystone
 endpoints:
   oslo_db:
     auth:
       admin:
         username: root
         password: mariadbRootPass
-        secret:
-          tls:
-            internal: mariadb-tls-direct
       placement:
         username: placement
         password: placementDBPass
-      nova_api:
-        username: nova
-        password: novaDBPass
     hosts:
       default: mariadb
-    host_fqdn_override:
-      default: null
     path: /placement
     scheme: mysql+pymysql
     port:
@@ -89,7 +52,7 @@ endpoints:
         user_domain_name: default
         project_domain_name: default
       placement:
-        role: admin
+        role: admin,service
         region_name: RegionOne
         username: placement
         password: PlacementServicePass
@@ -97,9 +60,6 @@ endpoints:
         user_domain_name: service
         project_domain_name: service
     hosts:
-      default: keystone
-      internal: keystone-api
-    host_fqdn_override:
       default: keystone
       internal: keystone-api
     path:
@@ -114,61 +74,51 @@ endpoints:
     name: placement
     hosts:
       default: placement-api
-      public: placement-api
       internal: placement-api
-    host_fqdn_override:
-      default: placement-api
       public: placement-api
-      internal: placement-api
     path:
       default: /
     scheme:
-      default: 'http'
-      service: 'http'
-      public: 'http'
+      default: http
+      service: http
+      public: http
     port:
       api:
         default: 8778
-        public: 8778
-        service: 8778
         internal: 8778
+        public: 8778
 network:
   api:
     port: 8778
-    ingress:
-      public: true
-      classes:
-        namespace: "nginx"
-        cluster: "nginx-cluster"
-    node_port:
-      enabled: false
 manifests:
-  certificates: false
-  configmap_bin: true
-  configmap_etc: true
   deployment: true
-  job_image_repo_sync: true
+  service: true          # Ensure ClusterIP service exists
+  ingress: false         # Disable ingress until needed
   job_db_init: true
   job_db_sync: true
-  job_db_drop: false
-  job_ks_endpoints: true
-  job_ks_service: true
   job_ks_user: true
-  network_policy: false
+  job_ks_service: true
+  job_ks_endpoints: true
+  job_db_drop: false
+  job_image_repo_sync: false
   secret_db: true
-  secret_ingress_tls: true
-  secret_registry: true
-  pdb: true
-  ingress: true
   secret_keystone: true
+  secret_registry: true
+  secret_ingress_tls: false
+  configmap_bin: true
+  configmap_etc: true
+  certificates: false
+  pdb: true
+  network_policy: false
   service_ingress: false
-  service: false
 ...
 EOF
 
 helm upgrade --install placement openstack-helm/placement \
-    --namespace=openstack \
-    --values ~/overrides/placement/placement.yaml
+  --namespace openstack \
+  --values ~/overrides/placement/placement.yaml
+  
+kubectl get endpoints -n openstack placement-api
 
 
 helm uninstall placement -n openstack
